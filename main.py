@@ -3,103 +3,149 @@ import sys
 from typing import List, Optional
 import requests
 
+# Ищем последовательности цифр с пробелами/дефисами, в сумме ровно 16 цифр.
+# (?<!\d) и (?!\d) гарантируют, что до/после нет других цифр (lookarounds).
+CARD_PATTERN = re.compile(r'(?<!\d)(?:\d[\s-]?){15}\d(?!\d)')
 
-# Этап 1: "Мягкое" регулярное выражение для поиска кандидатов.
-# Ищет любую последовательность, содержащую ровно 16 цифр,
-# которые могут быть разделены пробелами или дефисами.
-CARD_PATTERN = re.compile(r'\b\d(?:[\s-]?\d){15}\b')
 
-# Этап 2: Паттерн для строгой проверки префиксов уже очищенного номера.
-PREFIX_PATTERN = re.compile(r'^(?:4|5[1-5]|220[0-4])')
+def is_valid_prefix(cleaned_number: str) -> bool:
+    """
+    Проверка префиксов для 16-значных карт:
+    - Visa: 4...
+    - Mastercard: 51-55 и 2221-2720
+    - MIR: 2200-2204
+    """
+    first2 = int(cleaned_number[:2])
+    first4 = int(cleaned_number[:4])
+
+    if cleaned_number.startswith('4'):  # Visa
+        return True
+    if 51 <= first2 <= 55:  # Mastercard)
+        return True
+    if 2221 <= first4 <= 2720:  # Mastercard (новый диапазон)
+        return True
+    if 2200 <= first4 <= 2204:  # Mir
+        return True
+    return False
+
 
 def luhn_validate(card_number: str) -> bool:
     """
-    Проверяет валидность номера карты по алгоритму Луна (mod 10).
-
-    Алгоритм работает следующим образом:
-    1. Удаляются все нечисловые символы.
-    2. Цифры номера обрабатываются справа налево.
-    3. Каждая вторая цифра удваивается. Если результат > 9, из него вычитается 9.
-    4. Все полученные цифры (измененные и неизмененные) суммируются.
-    5. Если сумма кратна 10, номер считается валидным.
-
-    Args:
-        card_number: Строка с номером карты для проверки.
-
-    Returns:
-        True, если номер карты валиден, иначе False.
+    Классическая Luhn-проверка для 16-значной строки цифр.
     """
-    # Шаг 1: Очистка номера от всех нечисловых символов.
-    digits_str = "".join(filter(str.isdigit, card_number))
-
-    # Проверка на стандартную длину. Позже можно будет расширить.
-    if len(digits_str) != 16:
-        return False
-
-    digits = [int(d) for d in digits_str]
-    
-    # Шаг 2 и 3: Удвоение каждой второй цифры, начиная с предпоследней.
-    for i in range(len(digits) - 2, -1, -2):
-        doubled_digit = digits[i] * 2
-        if doubled_digit > 9:
-            doubled_digit -= 9
-        digits[i] = doubled_digit
-
-    # Шаг 4 и 5: Суммирование и проверка.
-    total = sum(digits)
+    total = 0
+    reversed_digits = list(map(int, card_number[::-1]))
+    for i, d in enumerate(reversed_digits):
+        if i % 2 == 1:  # Удваиваем каждый второй элемент (индексы 1, 3, 5...)
+            dbl = d * 2
+            if dbl > 9:
+                dbl -= 9
+            total += dbl
+        else:
+            total += d
     return total % 10 == 0
 
 
 def find_and_validate_card_numbers(text: str) -> List[str]:
     """
-    Находит в тексте все потенциальные номера карт и валидирует их.
+    Основная функция: находит кандидатов, проверяет их префикс и алгоритм Луна.
+    """
+    raw_matches = CARD_PATTERN.findall(text)
+    valid_numbers = []
+    seen = set()
+    for match in raw_matches:
+        cleaned = re.sub(r'\D', '', match)  # Оставляем только цифры
+        if len(cleaned) != 16:
+            continue
+        
+        # Выполняем обе проверки
+        if is_valid_prefix(cleaned) and luhn_validate(cleaned):
+            if cleaned not in seen:
+                seen.add(cleaned)
+                valid_numbers.append(cleaned)
+    return valid_numbers
+
+
+# --- Новые функции для работы с источниками данных ---
+
+def get_content_from_url(url: str) -> Optional[str]:
+    """
+    Получает текстовое содержимое веб-страницы по URL.
 
     Args:
-        text: Текст для поиска.
+        url: URL-адрес веб-страницы.
 
     Returns:
-        Список уникальных валидных номеров карт (без разделителей).
+        Текстовое содержимое страницы или None в случае ошибки.
     """
-    # Находим все строки, которые соответствуют нашему шаблону.
-    potential_numbers = CARD_PATTERN.findall(text)
-    
-    valid_numbers = []
-    for num in potential_numbers:
-        # Валидируем каждый найденный номер с помощью алгоритма Луна.
-        if luhn_validate(num):
-            # Если номер валиден, очищаем его от разделителей и добавляем в список.
-            cleaned_num = re.sub(r'[\s-]', '', num)
-            valid_numbers.append(cleaned_num)
-
-    # Возвращаем только уникальные номера.
-    return list(set(valid_numbers))
+    try:
+        # Устанавливаем заголовок, чтобы имитировать обычный браузер
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, timeout=10, headers=headers)
+        response.raise_for_status()  # Проверка на HTTP ошибки (4xx или 5xx)
+        return response.text
+    except requests.exceptions.RequestException as e:
+        print(f"Ошибка при загрузке URL {url}: {e}", file=sys.stderr)
+        return None
 
 
-# Точка входа в программу при запуске файла напрямую.
-# Используется для демонстрации и первичной отладки.
-if __name__ == '__main__':
-    # Тестовый текст, содержащий разные форматы номеров:
-    # - один валидный номер без разделителей
-    # - один валидный номер с пробелами
-    # - один невалидный номер
-    # - текст-заглушка
-    sample_text = """
-    Это тестовый текст для проверки работы парсера.
-    Вот валидный номер карты Visa: 4556789012345670.
-    А вот валидный номер Mastercard, записанный с пробелами: 5432 1098 7654 3210.
-    Это невалидный номер карты: 1234-5678-9012-3456.
-    Просто набор цифр: 987654321.
+def get_content_from_file(filepath: str) -> Optional[str]:
     """
+    Считывает содержимое из файла.
 
-    print("--- Поиск валидных номеров карт в тексте ---")
-    print("Анализируемый текст:")
-    print(sample_text)
-    
-    found_cards = find_and_validate_card_numbers(sample_text)
+    Args:
+        filepath: Путь к файлу.
 
-    if found_cards:
-        print("\nНайдены следующие валидные номера:")
-        for card in found_cards:
-            print(f"- {card}")
+    Returns:
+        Содержимое файла или None в случае ошибки.
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return f.read()
+    except (IOError, FileNotFoundError) as e:
+        print(f"Ошибка при чтении файла {filepath}: {e}", file=sys.stderr)
+        return None
+
+
+# --- Точка входа в программу ---
+
+def main():
+    """
+    Главная функция для интерактивного взаимодействия с пользователем.
+    """
+    print("--- Поиск и валидация номеров банковских карт ---")
+    print("Выберите источник данных:")
+    print("1. Пользовательский ввод")
+    print("2. Веб-страница (по URL)")
+    print("3. Локальный файл")
+
+    choice = input("Ваш выбор (1-3): ")
+    content = None
+
+    if choice == '1':
+        content = input("Введите текст для поиска номеров карт:\n")
+    elif choice == '2':
+        url = input("Введите URL веб-страницы: ")
+        content = get_content_from_url(url)
+    elif choice == '3':
+        filepath = input("Введите путь к файлу: ")
+        content = get_content_from_file(filepath)
     else:
-        print("\nВалидные номера карт не найдены.")
+        print("Неверный выбор. Программа завершена.", file=sys.stderr)
+        sys.exit(1)
+
+    if content:
+        print("\n--- Анализ данных... ---")
+        valid_cards = find_and_validate_card_numbers(content)
+        if valid_cards:
+            print("\nНайдены следующие валидные номера карт:")
+            for card in sorted(valid_cards):
+                print(f"- {card}")
+        else:
+            print("\nВалидные номера карт не найдены.")
+    else:
+        print("\nНе удалось получить данные для анализа.", file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()
