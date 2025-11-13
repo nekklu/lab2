@@ -33,6 +33,9 @@ def luhn_validate(card_number: str) -> bool:
     """
     Классическая Luhn-проверка для 16-значной строки цифр.
     """
+    if not card_number.isdigit():
+        return False
+    
     total = 0
     reversed_digits = list(map(int, card_number[::-1]))
     for i, d in enumerate(reversed_digits):
